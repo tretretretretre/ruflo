@@ -123,7 +123,7 @@
     "@ruvector/ruvllm-wasm": "^2.0.2",
     "@ruvector/rvagent-wasm": "^0.1.0",
     "@ruvector/sona": "^0.1.6",
-    "agentdb": "^3.0.0-alpha.13",
+    "agentdb": "^3.0.0-alpha.14",
     "agentic-flow": "^3.0.0-alpha.1"
   },
   "publishConfig": {

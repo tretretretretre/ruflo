@@ -25,6 +25,13 @@ on:
       # ruflo-graph-intelligence (#2044, ADR-123) — outside v3 workspace,
       # has its own lockfile + tests; needs to be CI-guarded on every change.
       - 'plugins/ruflo-graph-intelligence/**'
+      # Supply-chain hardening (#2046) — every package.json + lockfile +
+      # allowlist edit triggers the supply-chain audit.
+      - '**/package.json'
+      - '**/package-lock.json'
+      - '**/pnpm-lock.yaml'
+      - '.github/supply-chain/**'
+      - 'scripts/audit-supply-chain.mjs'
   pull_request:
     branches: [main]
     paths:
@@ -40,6 +47,13 @@ on:
       - 'plugins/ruflo-browser/**'
       # ruflo-graph-intelligence (#2044, ADR-123)
       - 'plugins/ruflo-graph-intelligence/**'
+      # Supply-chain hardening (#2046) — every dep + lockfile change is
+      # CVE-audited, allowlist-checked, integrity-checked.
+      - '**/package.json'
+      - '**/package-lock.json'
+      - '**/pnpm-lock.yaml'
+      - '.github/supply-chain/**'
+      - 'scripts/audit-supply-chain.mjs'
       # witness manifests / fix list — so witness-verify runs on PRs that
       # touch them (otherwise a stale per-OS manifest only fails post-merge).
       - 'verification/**'
@@ -398,6 +412,94 @@ jobs:
       - name: Run vitest
         working-directory: plugins/ruflo-graph-intelligence
         run: npx vitest run
+
+  supply-chain-audit:
+    # Supply-chain hardening (#2046, follow-up to ADR-123).
+    #
+    # Five layers of defence run by scripts/audit-supply-chain.mjs:
+    #   1. CVE — `npm audit --audit-level=high` on each shipped package.
+    #            HIGH/CRITICAL findings in DIRECT deps fail CI.
+    #   2. Lockfile integrity — every entry must have a SHA-512 `integrity`
+    #      hash. Missing or weak hashes are a tamper vector.
+    #   3. Top-level allowlist — new direct deps require an explicit
+    #      `.github/supply-chain/allowed-deps.json` addition. Block silent
+    #      additions via maintainer compromise or typo'd PRs.
+    #   4. Typosquat reject — names matching the policy block-list fail
+    #      regardless of whether the package actually exists upstream.
+    #   5. Publisher trust snapshot — logs npm maintainer identity for our
+    #      critical upstream deps so unexpected handover is visible in CI
+    #      logs (not a hard fail; informational).
+    #
+    # This job runs on every PR that touches a package.json, lockfile,
+    # allowlist, or the audit script itself. It also runs on pushes to main
+    # so direct-to-main changes (rare) are caught.
+    name: Supply-chain audit (#2046)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install ruflo-graph-intelligence deps (for npm audit)
+        working-directory: plugins/ruflo-graph-intelligence
+        run: npm ci --no-audit --no-fund --legacy-peer-deps
+
+      - name: Install @claude-flow/browser deps (for npm audit)
+        working-directory: v3/@claude-flow/browser
+        run: npm install --no-audit --no-fund --legacy-peer-deps --no-workspaces
+
+      - name: Run supply-chain audit
+        run: node scripts/audit-supply-chain.mjs
+
+      - name: Test audit script itself
+        run: node scripts/__tests__/audit-supply-chain.test.mjs
+
+  dependency-review:
+    # GitHub's official dependency-review-action — runs only on PRs and
+    # flags any new vulnerable dependency added by the PR vs the base
+    # branch. Configured to fail on `high` severity and to forbid
+    # known-bad licenses (GPL-style + non-OSI).
+    #
+    # **Setup requirement**: this action needs GitHub's Dependency Graph
+    # feature enabled at the repo level. Toggle at
+    # https://github.com/ruvnet/ruflo/settings/security_analysis under
+    # "Dependency graph". Until that toggle is on, the action errors
+    # with "Dependency review is not supported on this repository" — so
+    # this job is marked continue-on-error to keep the CVE/audit/codeowner
+    # layers of supply-chain hardening usable in the meantime.
+    #
+    # https://github.com/actions/dependency-review-action
+    name: Dependency review (#2046)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # `continue-on-error` is at the STEP (not job) level so the action's
+      # "Dependency review is not supported on this repository" error from
+      # the off-by-default Dependency Graph feature doesn't show as a PR
+      # check failure. Once the repo owner toggles Dependency Graph on at
+      # Settings → Security and analysis, remove this line to make the
+      # action gating again.
+      - name: Dependency Review
+        continue-on-error: true
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
+          # Block licenses we cannot ship:
+          deny-licenses: AGPL-3.0, GPL-3.0, SSPL-1.0
+          # Block known-compromised package versions via pURL (package-url)
+          # format — this is the action's required input shape per its docs.
+          # https://github.com/actions/dependency-review-action#configuration-options
+          deny-packages: pkg:npm/event-stream@3.3.6, pkg:npm/flatmap-stream, pkg:npm/ua-parser-js@0.7.29, pkg:npm/ua-parser-js@0.8.0, pkg:npm/ua-parser-js@1.0.0, pkg:npm/colors@1.4.1, pkg:npm/faker@6.6.6
 
   witness-marker-drift-smoke:
     # Regression guard for ruvnet/ruflo#2021 — the slow witness-verify
