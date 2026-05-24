@@ -85,6 +85,13 @@ on:
       # in callAnthropicMessages must stay wired.
       - 'v3/@claude-flow/cli/src/mcp-tools/agent-execute-core.ts'
       - 'scripts/smoke-agent-execute-providers.mjs'
+      # memory stats legacy-DB regression guard (#2120) — the WHERE
+      # status='active' filter must accept NULL too, and the schema
+      # backfill must promote NULL→'active' on existing DBs.
+      - 'v3/@claude-flow/cli/src/memory/memory-bridge.ts'
+      - 'v3/@claude-flow/cli/src/memory/memory-initializer.ts'
+      - 'v3/@claude-flow/cli/src/commands/status.ts'
+      - 'scripts/smoke-memory-stats-legacy-db.mjs'
       # GitHub skills/agents/helpers surface (#2089, ADR-127) — injection
       # smoke + actions pin smoke gate every change to the .github surface.
       - '.claude/agents/github/**'
@@ -165,6 +172,11 @@ on:
       # agent_execute provider routing (#2042)
       - 'v3/@claude-flow/cli/src/mcp-tools/agent-execute-core.ts'
       - 'scripts/smoke-agent-execute-providers.mjs'
+      # memory stats legacy-DB regression (#2120)
+      - 'v3/@claude-flow/cli/src/memory/memory-bridge.ts'
+      - 'v3/@claude-flow/cli/src/memory/memory-initializer.ts'
+      - 'v3/@claude-flow/cli/src/commands/status.ts'
+      - 'scripts/smoke-memory-stats-legacy-db.mjs'
       # GitHub skills/agents/helpers surface (#2089, ADR-127)
       - '.claude/agents/github/**'
       - '.claude/skills/github-*/**'
@@ -1038,6 +1050,45 @@ jobs:
 
       - name: Run agent_execute providers smoke
         run: node scripts/smoke-agent-execute-providers.mjs
+
+  memory-stats-legacy-db-smoke:
+    # Regression guard for ruvnet/ruflo#2120 — `ruflo memory stats` and
+    # `listEntries` returned 0 entries against a populated
+    # `.swarm/memory.db` on WSL2 (reporter: @alexandrelealbess on
+    # alpha.81). Root cause: the `WHERE status = 'active'` filter
+    # excluded rows where the status column was NULL (legacy DBs
+    # created before the status column existed, or via the auto-memory
+    # bridge path that didn't set status).
+    #
+    # Fix: (1) accept `status IS NULL` alongside `'active'` in both
+    # bridgeListEntries and listEntries; (2) backfill `UPDATE
+    # memory_entries SET status = 'active' WHERE status IS NULL` in
+    # ensureSchemaColumns; (3) broaden `isInitialized()` in
+    # `status.ts` to also accept `.swarm/memory.db` existence.
+    #
+    # This smoke builds a 251-entry DB with all-NULL status (mirroring
+    # the reporter's setup), runs listEntries, and asserts total === 251
+    # AND that the backfill promoted all rows to 'active'.
+    name: memory stats legacy-DB smoke (#2120)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install root deps (for sql.js + cli imports)
+        run: npm install --legacy-peer-deps --no-audit --no-fund --ignore-scripts
+
+      - name: Build CLI dist
+        run: cd v3/@claude-flow/cli && npm install --legacy-peer-deps --no-audit --no-fund --ignore-scripts && npm run build
+
+      - name: Run memory stats legacy-DB smoke
+        run: node scripts/smoke-memory-stats-legacy-db.mjs
 
   github-safe-injection-smoke:
     # Regression guard for ruvnet/ruflo#2089 — ADR-127 Phase 1.

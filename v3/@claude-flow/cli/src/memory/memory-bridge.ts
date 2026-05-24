@@ -822,11 +822,21 @@ export async function bridgeListEntries(options: {
     const nsFilter = namespace ? `AND namespace = ?` : '';
     const nsParams = namespace ? [namespace] : [];
 
+    // #2120 — `status IS NULL` accepted alongside `'active'`. Old
+    // databases imported by the auto-memory bridge (before the status
+    // column existed) end up with NULL status after schema migration if
+    // the migration ran on an existing DB without a backfill. Reporter
+    // @alexandrelealbess on WSL2 had 251 entries with NULL status, so
+    // the `status = 'active'` filter matched zero. Treat NULL as
+    // "legacy-active" — the safe default for any entry that predates the
+    // status column.
+    const statusFilter = `(status = 'active' OR status IS NULL)`;
+
     // Count
     let total = 0;
     try {
       const countStmt = ctx.db.prepare(
-        `SELECT COUNT(*) as cnt FROM memory_entries WHERE status = 'active' ${nsFilter}`
+        `SELECT COUNT(*) as cnt FROM memory_entries WHERE ${statusFilter} ${nsFilter}`
       );
       const countRow = countStmt.get(...nsParams);
       total = countRow?.cnt ?? 0;
@@ -840,7 +850,7 @@ export async function bridgeListEntries(options: {
       const stmt = ctx.db.prepare(`
         SELECT id, key, namespace, content, embedding, access_count, created_at, updated_at
         FROM memory_entries
-        WHERE status = 'active' ${nsFilter}
+        WHERE ${statusFilter} ${nsFilter}
         ORDER BY updated_at DESC
         LIMIT ? OFFSET ?
       `);

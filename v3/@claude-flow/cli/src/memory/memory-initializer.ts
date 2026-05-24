@@ -1084,6 +1084,23 @@ export async function ensureSchemaColumns(dbPath: string): Promise<{
       }
     }
 
+    // #2120 — Belt-and-suspenders backfill. `ALTER TABLE ADD COLUMN
+    // status TEXT DEFAULT 'active'` should populate existing rows with
+    // 'active' in modern SQLite, but: (a) some auto-memory bridge writes
+    // happen via INSERT paths that pass an explicit NULL, (b) some
+    // historical sql.js builds skipped the DEFAULT backfill, (c)
+    // entries can be migrated in from older snapshots. After ensuring
+    // the column exists, force-backfill any remaining NULL → 'active'.
+    // Safe on already-correct DBs (0 rows updated).
+    if (columnsAdded.includes('status') || existingColumns.has('status')) {
+      try {
+        db.run(`UPDATE memory_entries SET status = 'active' WHERE status IS NULL`);
+        modified = true;
+      } catch {
+        /* table is read-only or doesn't exist — skip */
+      }
+    }
+
     if (modified) {
       // Save updated database
       const data = db.export();
@@ -2541,10 +2558,13 @@ export async function listEntries(options: {
     const fileBuffer = readFileMaybeEncrypted(dbPath, null);
     const db = new SQL.Database(fileBuffer);
 
+    // #2120 — accept `status IS NULL` alongside `'active'`. Old DBs
+    // that predate the status column may have NULL after migration.
+    // See memory-bridge.ts:bridgeListEntries for full context.
     // Get total count
     const countStmt = namespace
-      ? db.prepare(`SELECT COUNT(*) as cnt FROM memory_entries WHERE status = 'active' AND namespace = ?`)
-      : db.prepare(`SELECT COUNT(*) as cnt FROM memory_entries WHERE status = 'active'`);
+      ? db.prepare(`SELECT COUNT(*) as cnt FROM memory_entries WHERE (status = 'active' OR status IS NULL) AND namespace = ?`)
+      : db.prepare(`SELECT COUNT(*) as cnt FROM memory_entries WHERE (status = 'active' OR status IS NULL)`);
     if (namespace) {
       countStmt.bind([namespace]);
     }
@@ -2559,9 +2579,10 @@ export async function listEntries(options: {
     // Get entries
     const safeLimit = parseInt(String(limit), 10) || 100;
     const safeOffset = parseInt(String(offset), 10) || 0;
+    // #2120 — same NULL-as-active acceptance as the count above.
     const listStmt = namespace
-      ? db.prepare(`SELECT id, key, namespace, content, embedding, access_count, created_at, updated_at FROM memory_entries WHERE status = 'active' AND namespace = ? ORDER BY updated_at DESC LIMIT ? OFFSET ?`)
-      : db.prepare(`SELECT id, key, namespace, content, embedding, access_count, created_at, updated_at FROM memory_entries WHERE status = 'active' ORDER BY updated_at DESC LIMIT ? OFFSET ?`);
+      ? db.prepare(`SELECT id, key, namespace, content, embedding, access_count, created_at, updated_at FROM memory_entries WHERE (status = 'active' OR status IS NULL) AND namespace = ? ORDER BY updated_at DESC LIMIT ? OFFSET ?`)
+      : db.prepare(`SELECT id, key, namespace, content, embedding, access_count, created_at, updated_at FROM memory_entries WHERE (status = 'active' OR status IS NULL) ORDER BY updated_at DESC LIMIT ? OFFSET ?`);
     if (namespace) {
       listStmt.bind([namespace, safeLimit, safeOffset]);
     } else {
