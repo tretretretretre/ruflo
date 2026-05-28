@@ -31,7 +31,11 @@ jobs:
         working-directory: v3
         run: pnpm install --frozen-lockfile
 
-      - name: Build @claude-flow/cli
+      - name: Build full v3 workspace (deps first)
+        working-directory: v3
+        run: pnpm --recursive --no-bail run build || true
+
+      - name: Build @claude-flow/cli (ensure fresh)
         working-directory: v3/@claude-flow/cli
         run: pnpm run build
 
