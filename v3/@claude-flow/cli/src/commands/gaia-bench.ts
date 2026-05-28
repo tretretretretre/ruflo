@@ -204,6 +204,12 @@ const runCommand: Command = {
       description: 'ADR-135 Track B: inject a planning checkpoint every N tool_use turns (default: 4, set 0 to disable). Based on smolagents finding — prevents tunnel-vision on bad strategies.',
       default: '4',
     },
+    {
+      name: 'enable-convergence',
+      type: 'boolean',
+      description: 'iter 62: enable convergence layer — forces a final commit when max_turns, loop, or token_overflow is detected (default: true). Disabling is for ablation only.',
+      default: 'true',
+    },
   ],
   examples: [
     {
@@ -271,6 +277,12 @@ const runCommand: Command = {
     const enableDecompose = ctx.flags['decompose'] === true || ctx.flags['decompose'] === 'true';
     // ADR-135 Track B: planning interval (passed through to runGaiaAgent via agentOpts).
     const planningInterval = parseInt(String(ctx.flags['planningInterval'] ?? ctx.flags['planning-interval'] ?? '4'), 10);
+    // iter 62: convergence layer — default ON, disable with --no-enable-convergence.
+    // Note: boolean false is falsy, so we check for explicit false values only.
+    const enableConvergence = !(
+      ctx.flags['enableConvergence'] === false || ctx.flags['enableConvergence'] === 'false' ||
+      ctx.flags['enable-convergence'] === false || ctx.flags['enable-convergence'] === 'false'
+    );
 
     // Dynamic imports to avoid loading at startup.
     // NOTE: gaia-*.ts sources are pre-compiled under dist/src/benchmarks/ only --
@@ -446,12 +458,13 @@ const runCommand: Command = {
             // Critic is suppressed when voting is active (same precedence rule as the global flag).
             const useThisCritic = enableCritic && !useThisVoting && runGaiaAgentWithCritic;
 
-            // Shared agent options (Track B planning interval wired here).
+            // Shared agent options (Track B planning interval + iter 62 convergence wired here).
             const agentOpts = {
               model: effectiveModel,
               maxTurns: effectiveMaxTurns,
               planningInterval,
               apiKey,
+              enableConvergence,
             };
 
             // ADR-135 Track E: decompose the question if enabled.

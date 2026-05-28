@@ -57,6 +57,14 @@ import {
   TextBlock,
   ContentBlock,
 } from './gaia-tools/index.js';
+import {
+  checkConvergenceTriggers,
+  createConvergenceState,
+  forceCommit,
+  recordTurn,
+  argsHash as convergenceArgsHash,
+} from './gaia-convergence.js';
+import type { ConvergenceState } from './gaia-convergence.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -119,6 +127,10 @@ export interface GaiaAgentResult {
   /** Number of planning-checkpoint injections during this run (0 when planning is disabled). */
   replanCount?: number;
   timedOut?: boolean;
+  /** Set when the convergence layer fired and committed the final answer. */
+  convergenceTrigger?: string;
+  /** True when the convergence layer recovered the answer from prior message history. */
+  convergenceUsedFallback?: boolean;
   error?: string;
 }
 
@@ -146,6 +158,19 @@ export interface GaiaAgentOptions {
    * Exposed so callers can inject mocks for testing.
    */
   catalogue?: GaiaToolCatalogue;
+  /**
+   * Enable the convergence layer (default: true).
+   *
+   * When enabled, the convergence layer monitors for three failure modes:
+   *   1. max_turns hit without FINAL_ANSWER
+   *   2. Loop (same tool+args 3× in a 5-turn window)
+   *   3. Token overflow (>120k input tokens)
+   *
+   * On detection, a forced-commit phase is run: one API call with a
+   * directive prompt, no tools, then a fallback scan of prior messages.
+   * Set to false to disable (e.g. for ablation testing).
+   */
+  enableConvergence?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -485,6 +510,7 @@ export async function runGaiaAgent(
     planningInterval = PLANNING_INTERVAL,
     apiKey: suppliedKey,
     catalogue: suppliedCatalogue,
+    enableConvergence = true,
   } = options;
 
   const wallStart = Date.now();
@@ -497,6 +523,9 @@ export async function runGaiaAgent(
   let totalOutputTokens = 0;
   let replanCount = 0;
 
+  // Convergence layer state — tracks turns, tokens, and tool call patterns.
+  const convState: ConvergenceState = createConvergenceState();
+
   const messages: MessageParam[] = [
     { role: 'user', content: buildInitialContent(question) },
   ];
@@ -505,6 +534,48 @@ export async function runGaiaAgent(
 
   for (let turn = 0; turn < maxTurns; turn++) {
     turns = turn + 1;
+
+    // --- Convergence check: token overflow or loop (BEFORE the API call) ---
+    if (enableConvergence) {
+      const earlyTrigger = checkConvergenceTriggers(convState, maxTurns);
+      if (earlyTrigger === 'token_overflow' || earlyTrigger === 'loop') {
+        process.stderr.write(
+          `[convergence] ${earlyTrigger} detected at turn ${turns} — forcing commit\n`,
+        );
+        const commitResult = await forceCommit(
+          messages as Array<{ role: string; content: string | unknown }>,
+          async (msgs) => {
+            const r = await callAnthropicWithTools(
+              apiKey, model,
+              msgs as MessageParam[],
+              [], // NO tools in forced-commit call
+              maxTokensPerTurn,
+              perTurnTimeoutMs,
+            );
+            const textParts = r.content
+              .filter((b) => b.type === 'text')
+              .map((b) => (b as TextBlock).text)
+              .join('\n');
+            totalInputTokens += r.usage.input_tokens;
+            totalOutputTokens += r.usage.output_tokens;
+            return textParts;
+          },
+          earlyTrigger,
+        );
+        return {
+          questionId: question.task_id,
+          finalAnswer: commitResult.answer,
+          turns,
+          toolCallsByName,
+          totalInputTokens,
+          totalOutputTokens,
+          wallMs: Date.now() - wallStart,
+          replanCount,
+          convergenceTrigger: earlyTrigger,
+          convergenceUsedFallback: commitResult.usedFallback,
+        };
+      }
+    }
 
     let resp: AnthropicResponse;
     try {
@@ -533,6 +604,11 @@ export async function runGaiaAgent(
     totalInputTokens += resp.usage.input_tokens;
     totalOutputTokens += resp.usage.output_tokens;
 
+    // Update convergence state: record token usage for this turn (tool calls tracked below).
+    if (enableConvergence) {
+      recordTurn(convState, resp.usage.input_tokens, []);
+    }
+
     if (resp.stop_reason === 'end_turn' || resp.stop_reason === 'max_tokens') {
       const finalAnswer = extractFinalAnswer(resp);
       return {
@@ -548,11 +624,29 @@ export async function runGaiaAgent(
     }
 
     if (resp.stop_reason === 'tool_use') {
-      // Track tool call counts before executing
+      // Track tool call counts and update convergence state with this turn's tool calls.
+      const toolCallsThisTurn: Array<{ name: string; args: object }> = [];
       for (const block of resp.content) {
         if (block.type === 'tool_use') {
           const toolBlock = block as ToolUseBlock;
           toolCallsByName[toolBlock.name] = (toolCallsByName[toolBlock.name] ?? 0) + 1;
+          if (enableConvergence) {
+            toolCallsThisTurn.push({
+              name: toolBlock.name,
+              args: (toolBlock.input ?? {}) as object,
+            });
+          }
+        }
+      }
+
+      // Append tool call fingerprints to convergence state.
+      if (enableConvergence && toolCallsThisTurn.length > 0) {
+        for (const tc of toolCallsThisTurn) {
+          convState.toolCalls.push({
+            name: tc.name,
+            argsHash: convergenceArgsHash(tc.name, tc.args),
+            turn: turns,
+          });
         }
       }
 
@@ -601,7 +695,46 @@ export async function runGaiaAgent(
     };
   }
 
-  // Exhausted maxTurns
+  // Exhausted maxTurns — attempt convergence-layer forced commit if enabled.
+  if (enableConvergence) {
+    process.stderr.write(
+      `[convergence] max_turns (${maxTurns}) exhausted — forcing commit\n`,
+    );
+    const commitResult = await forceCommit(
+      messages as Array<{ role: string; content: string | unknown }>,
+      async (msgs) => {
+        const r = await callAnthropicWithTools(
+          apiKey, model,
+          msgs as MessageParam[],
+          [], // NO tools in forced-commit call
+          maxTokensPerTurn,
+          perTurnTimeoutMs,
+        );
+        const textParts = r.content
+          .filter((b) => b.type === 'text')
+          .map((b) => (b as TextBlock).text)
+          .join('\n');
+        totalInputTokens += r.usage.input_tokens;
+        totalOutputTokens += r.usage.output_tokens;
+        return textParts;
+      },
+      'max_turns',
+    );
+    return {
+      questionId: question.task_id,
+      finalAnswer: commitResult.answer,
+      turns,
+      toolCallsByName,
+      totalInputTokens,
+      totalOutputTokens,
+      wallMs: Date.now() - wallStart,
+      replanCount,
+      timedOut: !commitResult.answer,
+      convergenceTrigger: 'max_turns',
+      convergenceUsedFallback: commitResult.usedFallback,
+    };
+  }
+
   return {
     questionId: question.task_id,
     finalAnswer: null,
