@@ -974,8 +974,11 @@ export const agentdbGraphQuery: MCPTool = {
           const db = await getBridgeDb();
           if (db) {
             const cteSql = buildKHopCTE(nodeId, Math.min(depth, 3), relation, budget.maxNodesVisited);
-            const result = db.exec(cteSql);
-            const rows = result?.[0]?.values ?? [];
+            // graph-edge-writer returns a better-sqlite3 Database after #2431.
+            // `db.exec(sql, params)` (sql.js style) is a runner with no result
+            // on better-sqlite3 — use `prepare(sql).raw().all(...)` to get the
+            // same array-of-arrays shape the downstream code expects.
+            const rows = db.prepare(cteSql).raw().all() as unknown[][];
             return {
               success: true, mode, nodeId, depth,
               results: rows.map((r: unknown[]) => ({ nodeId: r[0], depth: r[1] })),
@@ -1002,12 +1005,13 @@ export const agentdbGraphQuery: MCPTool = {
           const db = await getBridgeDb(undefined, { createIfMissing: true });
           if (!db) return { success: false, error: 'graph_edges DB unavailable (sql.js could not load)', hint: 'Check Node version + try `ruflo memory init` to initialize manually.', mode, nodeId };
 
-          // Load all rows with embedding_ref and score by cosine
-          const rowResult = db.exec(
+          // Load all rows with embedding_ref and score by cosine.
+          // better-sqlite3 API — `db.exec(sql, params)` (sql.js) silently
+          // throws "datatype mismatch" because exec ignores params, so `?`
+          // binds to nothing and SQLite rejects the LIMIT clause.
+          const rows = db.prepare(
             `SELECT id, source_id, target_id, relation, weight, embedding_ref FROM graph_edges WHERE embedding_ref IS NOT NULL LIMIT ?`,
-            [budget.maxNodesVisited],
-          );
-          const rows = rowResult?.[0]?.values ?? [];
+          ).raw().all(budget.maxNodesVisited) as unknown[][];
           const { decodeEmbedding } = await import('../memory/embedding-quantization.js');
 
           const scored: Array<{ nodeId: string; score: number; relation: string }> = [];
@@ -1045,11 +1049,10 @@ export const agentdbGraphQuery: MCPTool = {
           const db = await getBridgeDb(undefined, { createIfMissing: true });
           if (!db) return { success: false, error: 'graph_edges DB unavailable (sql.js could not load)', hint: 'Check Node version + try `ruflo memory init` to initialize manually.', mode, nodeId };
 
-          const edgeResult = db.exec(
+          // better-sqlite3 API — see semantic-mode comment above.
+          const edges = db.prepare(
             `SELECT source_id, target_id, weight FROM graph_edges LIMIT ?`,
-            [budget.maxNodesVisited],
-          );
-          const edges = edgeResult?.[0]?.values ?? [];
+          ).raw().all(budget.maxNodesVisited) as unknown[][];
           if (edges.length === 0) {
             return { success: true, mode, nodeId, results: [], count: 0, message: 'graph_edges is empty', elapsedMs: Date.now() - t0 };
           }
@@ -1255,11 +1258,11 @@ export const agentdbGraphPathfinder: MCPTool = {
         ? 'source_id, target_id, weight, last_reinforced, confidence'
         : 'source_id, target_id, weight';
 
-      const edgeResult = db.exec(
+      // better-sqlite3 API — see graph-query comment above; sql.js-style
+      // `db.exec(sql, params)` throws "datatype mismatch" here.
+      const rawEdges = db.prepare(
         `SELECT ${colsSql} FROM graph_edges LIMIT ?`,
-        [budget.maxNodesVisited],
-      );
-      const rawEdges = edgeResult?.[0]?.values ?? [];
+      ).raw().all(budget.maxNodesVisited) as unknown[][];
 
       if (rawEdges.length === 0) {
         return { success: true, paths: [], count: 0, message: `no edges found from seedNodeId`, seedNodeId, algorithm, elapsedMs: Date.now() - t0 };

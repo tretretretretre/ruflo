@@ -54,8 +54,15 @@ async function sleep(ms) {
 }
 
 async function countEdgesByRelation(relation) {
-  // Read directly from file without resetting the module cache
-  // (resetting during an in-flight write would break flushDb)
+  // Close the better-sqlite3 writer connection so its WAL is checkpointed
+  // back into the main DB file before we re-read via sql.js. #2431 put
+  // the writer in WAL mode and without this checkpoint sql.js sees only
+  // the pre-insert main file (the trajectory edges live in the .db-wal
+  // sidecar until the writer closes).
+  try {
+    const { _resetBridgeDb } = await distImport('memory/graph-edge-writer.js');
+    _resetBridgeDb();
+  } catch { /* writer never opened — no WAL to checkpoint */ }
   try {
     const SQL = await loadSqlJs();
     if (!fs.existsSync(dbPath)) return 0;
