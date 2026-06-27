@@ -32,7 +32,7 @@ Knowledge graph commands:
 4. Include legend with entity types and relation types
 
 **`kg search <query>`** -- Semantic search across the knowledge graph.
-1. Route the query via `mcp__claude-flow__agentdb_semantic-route` to find relevant entities
+1. Search entities via `mcp__claude-flow__agentdb_pattern-search` (the `semanticRouter` controller is `enabled: false` in current AgentDB builds — pattern-search is the available substitute; see ruvnet/ruflo#2049)
 2. Expand results with causal edges to show related context
-3. Rank by semantic similarity score
+3. Rank by pattern-match score (fall back to `mcp__claude-flow__embeddings_generate` + manual cosine for higher-fidelity semantic similarity if needed)
 4. Display matches with entity name, type, file location, and relevance score
