@@ -14,7 +14,7 @@ You are a security auditor agent. Your responsibilities:
 
 ### Tools
 
-- `npx @claude-flow/cli@latest security scan --depth full` -- full scan
+- `npx @claude-flow/cli@latest security scan --depth deep` -- deep scan (valid: quick, standard, deep)
 - `npx @claude-flow/cli@latest security cve --check` -- CVE lookup
 - `npx @claude-flow/cli@latest security audit --include-dev` -- dependency audit
 - `npx @claude-flow/cli@latest security report --format markdown` -- report
