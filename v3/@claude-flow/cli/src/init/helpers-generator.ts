@@ -457,8 +457,38 @@ export function generateHookHandler(): string {
     "const path = require('path');",
     "const fs = require('fs');",
     "const os = require('os');",
+    "const { spawn } = require('child_process');",
     '',
     'const helpersDir = __dirname;',
+    '',
+    // #2661-adjacent fix: `refreshRemoteMessages()` (the funnel promo/disclosure
+    // pool) is fire-and-forget by design so the statusline's own short-lived
+    // per-render subprocess never blocks on a network call — but that also
+    // means it NEVER gets a chance to finish there (confirmed live: two
+    // consecutive cold-cache statusline renders returned promo:null and no
+    // cache file was ever written). `refresh-funnel` exists specifically to
+    // be spawned from a longer-lived context; wire that spawn here, once per
+    // session, detached so it survives this hook process exiting and isn't
+    // awaited so it never adds to the hook's own timeout budget.
+    //
+    // Deliberately always via npx (--prefer-offline avoids a registry round
+    // trip when already cached), never a locally-resolved bin/cli.js path:
+    // a fire-and-forget detached spawn has no way to recover if the first
+    // candidate is a broken/unbuilt local install (confirmed live — a stale
+    // marketplace checkout with a bin/cli.js that exists but throws
+    // MODULE_NOT_FOUND on its own dist/ silently ate the spawn with no
+    // fallback and no visible error, since stdio is intentionally ignored).
+    // npx resolves a real, structurally-valid published package every time.
+    'function spawnFunnelRefresh() {',
+    '  try {',
+    "    var cmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';",
+    "    var args = ['--prefer-offline', '@claude-flow/cli', 'hooks', 'refresh-funnel', '--quiet'];",
+    '    var child = spawn(cmd, args, {',
+    "      detached: true, stdio: 'ignore', env: Object.assign({}, process.env),",
+    '    });',
+    '    child.unref();',
+    '  } catch (e) { /* best-effort — the statusline\'s own fallback still renders */ }',
+    '}',
     '',
     'function safeRequire(modulePath) {',
     '  try {',
@@ -625,6 +655,7 @@ export function generateHookHandler(): string {
     '  },',
     '',
     "  'session-restore': () => {",
+    '    spawnFunnelRefresh();',
     '    if (session) {',
     '      var existing = session.restore && session.restore();',
     '      if (!existing) {',
