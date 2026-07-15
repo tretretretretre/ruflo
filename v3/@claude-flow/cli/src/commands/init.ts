@@ -173,6 +173,22 @@ async function maybeInstallSkillsSh(ctx: CommandContext): Promise<void> {
     if (ctx.flags.format === 'json') return;
     if (/^(1|true|on|yes)$/i.test(String(process.env.RUFLO_NO_SKILLS_SH || ''))) return;
 
+    // Idempotency gate: if this project has already registered ruflo with
+    // skills.sh, don't re-clone the repo + re-fire a fresh install telemetry
+    // event on every `ruflo init --force` / `init upgrade` / etc. Each install
+    // pings skills.sh's leaderboard AND clones the whole ruvnet/ruflo repo
+    // (~50MB) — re-running per-init would silently inflate our own metrics
+    // (GitHub unique-cloners, skills.sh rank) and waste user bandwidth. This
+    // check makes the registration once-per-project, matching the intent.
+    const nodePath = await import('path');
+    const nodeFs = await import('fs');
+    const marker = nodePath.join(ctx.cwd, '.agents', 'skills', 'ruflo');
+    if (nodeFs.existsSync(marker)) {
+      output.writeln();
+      output.writeln(output.dim('  skills.sh registration already present at .agents/skills/ruflo — skipping'));
+      return;
+    }
+
     const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
     if (!commandExists('npx')) return;
 
