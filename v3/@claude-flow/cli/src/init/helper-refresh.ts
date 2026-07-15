@@ -14,6 +14,7 @@
  * heavy generators only on the rare fallback path (source dir unresolvable).
  */
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
@@ -218,50 +219,131 @@ async function writeCriticalHelpers(
  * signed fixture and get real, deterministic coverage of the verify → hash →
  * copy logic without depending on that.
  */
+async function refreshOneHelpersDir(
+  helpersDir: string,
+  version: string,
+  opts: { sourceDirOverride?: string; pubkeyPemOverride?: string },
+): Promise<{ refreshed: boolean; from?: string; to?: string; blocked?: string }> {
+  if (!fs.existsSync(path.join(helpersDir, 'hook-handler.cjs'))) return { refreshed: false };
+
+  // .LOCKED marker: users developing ruflo itself (or any project with
+  // hand-maintained helpers) can place a `.LOCKED` file at
+  // `.claude/helpers/.LOCKED` to opt out of auto-refresh entirely. Fixes the
+  // observed-live concurrent-session clobber where a sibling Claude Code
+  // session running a stale cached CLI would overwrite hand-edited helpers
+  // on this repo (CLAUDE.md "Concurrent-session helper corruption"). The
+  // existing semver.gte guard below still fires for normal installs — this
+  // is the escape hatch for the small set of users editing helpers directly.
+  // Applies to whichever dir this call is refreshing (project or global).
+  if (fs.existsSync(path.join(helpersDir, '.LOCKED'))) {
+    return { refreshed: false, blocked: '.LOCKED marker present — refresh skipped (delete to re-enable)' };
+  }
+
+  let stamped = '';
+  try { stamped = fs.readFileSync(path.join(helpersDir, HELPERS_STAMP_FILE), 'utf-8').trim(); } catch { /* pre-feature: unstamped */ }
+  if (stamped === version) return { refreshed: false }; // up to date — fast path
+  if (stamped && semver.valid(stamped) && semver.valid(version) && semver.gte(stamped, version)) {
+    // Stamped version is already >= what this binary reports — refreshing
+    // would silently DOWNGRADE the helpers. Skip, untouched.
+    return { refreshed: false };
+  }
+  const res = await writeCriticalHelpers(helpersDir, version, {
+    sourceDirOverride: opts.sourceDirOverride,
+    pubkeyPemOverride: opts.pubkeyPemOverride,
+  });
+  if (res.blocked) return { refreshed: false, blocked: res.blocked };
+  return res.wrote ? { refreshed: true, from: stamped || '(unstamped)', to: version } : { refreshed: false };
+}
+
+/**
+ * On CLI startup, refresh critical helpers if their stamp is older than the
+ * installed CLI version. Two passes:
+ *
+ * 1. **Project pass** — `<cwd>/.claude/helpers/`. Always attempted. The
+ *    original behavior; project statuslines pin to a stamp per repo.
+ *
+ * 2. **Global pass** — `~/.claude/helpers/`. Opt-in via `alsoRefreshGlobal`.
+ *    Fixes the "promo row missing on remote installs" bug: `ruflo init`
+ *    writes helpers to `~/.claude/helpers/` too so Claude Code's global
+ *    settings.json statusLine can fall back to them (executor.ts:460-462),
+ *    but nothing ever REFRESHED that global copy — so any install predating
+ *    a helpers change (e.g. the 2026-07-13 funnel/promo Line-3 addition)
+ *    stayed frozen at the pre-feature statusline forever, even after `npm
+ *    i -g @claude-flow/cli@latest`. The global pass fixes that on the next
+ *    `ruflo <anything>` invocation. Same forward-only `semver.gte` guard
+ *    protects against downgrade by a stale cached CLI.
+ *
+ *    `alsoRefreshGlobal` defaults FALSE so tests don't touch the developer's
+ *    real `~/.claude/helpers/`. The real CLI entry (src/index.ts) passes
+ *    `true` to activate the global pass in production.
+ *
+ * Best-effort, never throws. No-op for a helpers dir that doesn't already
+ * contain a `hook-handler.cjs` — never creates files in an unrelated dir.
+ *
+ * FORWARD-ONLY (never downgrades): refreshing on any mere INEQUALITY, rather
+ * than only when the installed version is semver-NEWER, is a real corruption
+ * vector — confirmed live: a stray/older installed binary (a stale `npx`
+ * cache, a marketplace install lagging behind an unpublished dev-tree fix)
+ * running `daemon start` (or any command) would see its own older version !=
+ * the project's newer stamp and silently overwrite hand-fixed
+ * `hook-handler.cjs`/`intelligence.cjs` with its own older, already-superseded
+ * bundled copies. Comparing with `semver.gt` instead of `!==` makes that
+ * impossible: an older or equal installed version is always a no-op,
+ * regardless of how it got invoked.
+ *
+ * `opts` exists for tests ONLY (mirrors daemon-autostart.ts's injectable
+ * `SpawnDaemonFn` pattern): the real signed-copy path is otherwise coupled
+ * to THIS repo's actual current `.claude/helpers` + its real Ed25519
+ * signature — fine for production (that coupling to the real source IS the
+ * point), but it means a test exercising that path for real would only pass
+ * when this repo's manifest happens to be currently re-signed, which is a
+ * separately-gated, occasionally-stale publish-time step. `sourceDirOverride`
+ * + `pubkeyPemOverride` let a test build its own tiny, throwaway-keypair-
+ * signed fixture and get real, deterministic coverage of the verify → hash
+ * → copy logic without depending on that.
+ *
+ * Return shape: the project-pass result is the top-level object (backwards-
+ * compat with pre-3.31.3 callers). If the global pass ran, its own result is
+ * carried in the optional `global` field.
+ */
 export async function autoRefreshHelpersIfStale(
   cwd: string,
-  opts: { sourceDirOverride?: string; pubkeyPemOverride?: string; versionOverride?: string } = {},
-): Promise<{ refreshed: boolean; from?: string; to?: string; blocked?: string }> {
+  opts: {
+    sourceDirOverride?: string;
+    pubkeyPemOverride?: string;
+    versionOverride?: string;
+    alsoRefreshGlobal?: boolean;
+  } = {},
+): Promise<{
+  refreshed: boolean;
+  from?: string;
+  to?: string;
+  blocked?: string;
+  global?: { refreshed: boolean; from?: string; to?: string; blocked?: string };
+}> {
   try {
-    const helpersDir = path.join(cwd, '.claude', 'helpers');
-    if (!fs.existsSync(path.join(helpersDir, 'hook-handler.cjs'))) return { refreshed: false };
-
-    // .LOCKED marker: users developing ruflo itself (or any project with
-    // hand-maintained helpers) can place a `.LOCKED` file at
-    // `.claude/helpers/.LOCKED` to opt this project out of auto-refresh
-    // entirely. Fixes the observed-live concurrent-session clobber where a
-    // sibling Claude Code session running a stale cached CLI would overwrite
-    // hand-edited helpers on this repo (CLAUDE.md "Concurrent-session helper
-    // corruption"). Existing semver.gte guard below still fires for normal
-    // installs — this is the escape hatch for the small set of users editing
-    // helpers directly. Delete the file to re-enable refresh.
-    if (fs.existsSync(path.join(helpersDir, '.LOCKED'))) {
-      return { refreshed: false, blocked: '.LOCKED marker present — refresh skipped (delete to re-enable)' };
-    }
-
-    // Also honor an env-level opt-out for CI / release-time scripting that
-    // knows it doesn't want any writes to helpers this run.
+    // Env-level opt-out — applies to BOTH project and global passes.
     if (/^(1|true|on|yes)$/i.test(String(process.env.RUFLO_HELPERS_LOCKED || ''))) {
       return { refreshed: false, blocked: 'RUFLO_HELPERS_LOCKED env — refresh skipped' };
     }
 
     const version = opts.versionOverride ?? getInstalledCliVersion();
-    let stamped = '';
-    try { stamped = fs.readFileSync(path.join(helpersDir, HELPERS_STAMP_FILE), 'utf-8').trim(); } catch { /* pre-feature: unstamped */ }
-    if (stamped === version) return { refreshed: false }; // up to date — fast path
-    if (stamped && semver.valid(stamped) && semver.valid(version) && semver.gte(stamped, version)) {
-      // Stamped version is already >= what this binary reports — refreshing
-      // would silently DOWNGRADE the project's helpers. Skip, untouched.
-      return { refreshed: false };
+    const projectDir = path.join(cwd, '.claude', 'helpers');
+    const projectResult = await refreshOneHelpersDir(projectDir, version, opts);
+
+    // Global pass — opt-in only; test callers omit alsoRefreshGlobal to avoid
+    // touching the developer's real ~/.claude/helpers.
+    if (opts.alsoRefreshGlobal) {
+      const globalDir = path.join(os.homedir(), '.claude', 'helpers');
+      // Skip if project === global (e.g. someone invoked ruflo from $HOME
+      // and $HOME happens to be a ruflo project — refreshing twice is
+      // redundant AND could second-guess the first pass's result).
+      if (path.resolve(globalDir) !== path.resolve(projectDir)) {
+        const globalResult = await refreshOneHelpersDir(globalDir, version, opts);
+        return { ...projectResult, global: globalResult };
+      }
     }
-    const res = await writeCriticalHelpers(helpersDir, version, {
-      sourceDirOverride: opts.sourceDirOverride,
-      pubkeyPemOverride: opts.pubkeyPemOverride,
-    });
-    // A blocked refresh is a SECURITY signal (tampered source/manifest) — surface
-    // it, don't advance the stamp, and leave the project's existing helpers intact.
-    if (res.blocked) return { refreshed: false, blocked: res.blocked };
-    return res.wrote ? { refreshed: true, from: stamped || '(unstamped)', to: version } : { refreshed: false };
+    return projectResult;
   } catch {
     return { refreshed: false };
   }

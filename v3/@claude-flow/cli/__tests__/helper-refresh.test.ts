@@ -149,6 +149,74 @@ describe('autoRefreshHelpersIfStale', () => {
     expect(readFileSync(join(helpersDir, HELPERS_STAMP_FILE), 'utf-8').trim()).toBe(futureVersion);
   });
 
+  it('alsoRefreshGlobal:true refreshes ~/.claude/helpers under a redirected HOME (regression: pre-3.31.3 the global copy never refreshed, so the 2026-07-13 promo row never reached existing installs)', async () => {
+    const { cwd } = makeProject(); // project dir is a real ruflo project so the project pass has something to do
+    const projectHelpers = join(cwd, '.claude', 'helpers');
+    writeFileSync(join(projectHelpers, 'hook-handler.cjs'), 'intelligence.feedback(true); // OLD project\n');
+    writeFileSync(join(projectHelpers, HELPERS_STAMP_FILE), '0.0.1-old');
+
+    // Redirect HOME so we don't touch the developer's real ~/.claude/helpers.
+    // Populate the "global" helpers dir with a stale-stamped hook-handler.
+    const fakeHome = mkdtempSync(join(tmpdir(), 'helper-refresh-home-'));
+    const globalHelpers = join(fakeHome, '.claude', 'helpers');
+    mkdirSync(globalHelpers, { recursive: true });
+    writeFileSync(join(globalHelpers, 'hook-handler.cjs'), 'intelligence.feedback(true); // OLD global\n');
+    writeFileSync(join(globalHelpers, HELPERS_STAMP_FILE), '0.0.1-old');
+
+    const { sourceDir, pubkeyPem } = makeSignedSource(version);
+    const savedHome = process.env.HOME;
+    const savedUserProfile = process.env.USERPROFILE;
+    process.env.HOME = fakeHome;
+    process.env.USERPROFILE = fakeHome; // Node's os.homedir() reads USERPROFILE on Windows
+    try {
+      const r = await autoRefreshHelpersIfStale(cwd, {
+        sourceDirOverride: sourceDir,
+        pubkeyPemOverride: pubkeyPem,
+        alsoRefreshGlobal: true,
+      });
+      // Project pass fired (top-level fields are the project result — API compat)
+      expect(r.refreshed).toBe(true);
+      expect(r.to).toBe(version);
+      // Global pass ALSO fired, carried in the new `global` field
+      expect(r.global?.refreshed).toBe(true);
+      expect(r.global?.from).toBe('0.0.1-old');
+      expect(r.global?.to).toBe(version);
+      // Global hook-handler was actually rewritten (not just the stamp)
+      const refreshedGlobal = readFileSync(join(globalHelpers, 'hook-handler.cjs'), 'utf-8');
+      expect(refreshedGlobal).toMatch(/toolFailed/);
+      expect(refreshedGlobal).not.toContain('// OLD global');
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+      if (savedUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedUserProfile;
+    }
+  });
+
+  it('alsoRefreshGlobal defaults to false — tests without the flag never touch $HOME (invariant that keeps every OTHER test in this file safe)', async () => {
+    const { cwd, helpersDir } = makeProject();
+    writeFileSync(join(helpersDir, 'hook-handler.cjs'), 'intelligence.feedback(true);\n');
+    writeFileSync(join(helpersDir, HELPERS_STAMP_FILE), '0.0.1-old');
+
+    // Redirect HOME to an empty scratch dir with no .claude/helpers. If the
+    // global pass fired despite the flag being unset, this test would either
+    // create files under fakeHome (assertion below catches it) or surface a
+    // `global` field on the result (also checked).
+    const fakeHome = mkdtempSync(join(tmpdir(), 'helper-refresh-should-not-touch-home-'));
+    const savedHome = process.env.HOME;
+    const savedUserProfile = process.env.USERPROFILE;
+    process.env.HOME = fakeHome;
+    process.env.USERPROFILE = fakeHome;
+    try {
+      const { sourceDir, pubkeyPem } = makeSignedSource(version);
+      const r = await autoRefreshHelpersIfStale(cwd, { sourceDirOverride: sourceDir, pubkeyPemOverride: pubkeyPem });
+      expect(r.refreshed).toBe(true); // project pass still fired
+      expect(r.global).toBeUndefined(); // global pass DID NOT fire
+      expect(existsSync(join(fakeHome, '.claude'))).toBe(false); // never scaffolded under HOME
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+      if (savedUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedUserProfile;
+    }
+  });
+
   it('never downgrades — an EQUAL-but-differently-formatted stamp is a no-op', async () => {
     // e.g. stamp has a build/prerelease suffix that string-compares unequal
     // to the installed version but is semver-equal or newer.
