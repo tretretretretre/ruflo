@@ -99,7 +99,14 @@ describe('Ruflo Codex MCP configuration', () => {
   });
 
   it('preserves a user timeout that is already above the minimum', () => {
-    const source = '[mcp_servers.ruflo]\ncommand = "npx"\nstartup_timeout_sec = 300\n';
+    const source = '[mcp_servers.ruflo]\ncommand = "npx"\nstartup_timeout_sec = 300 # slow cold start\n';
     expect(upsertMcpServerStartupTimeout(source)).toBe(source);
+  });
+
+  it('raises a low timeout without deleting its inline comment', () => {
+    const source = '[mcp_servers.ruflo]\ncommand = "npx"\n  startup_timeout_sec = 30 # user note\n';
+    expect(upsertMcpServerStartupTimeout(source)).toContain(
+      '  startup_timeout_sec = 120 # user note',
+    );
   });
 });

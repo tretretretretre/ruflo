@@ -152,12 +152,16 @@ export function upsertMcpServerStartupTimeout(
 
   const timeoutPattern = /^\s*startup_timeout_sec\s*=/;
   for (let index = start + 1; index < end; index += 1) {
-    if (timeoutPattern.test(lines[index] ?? '')) {
-      const currentValue = Number((lines[index] ?? '').split('=', 2)[1]?.trim());
+    const line = lines[index] ?? '';
+    if (timeoutPattern.test(line)) {
+      const parsed = line.match(/^(\s*startup_timeout_sec\s*=\s*)([0-9][0-9_]*)(.*)$/);
+      const currentValue = parsed ? Number(parsed[2]!.replace(/_/g, '')) : Number.NaN;
       if (Number.isFinite(currentValue) && currentValue >= timeoutSec) {
         return config;
       }
-      lines[index] = `startup_timeout_sec = ${timeoutSec}`;
+      lines[index] = parsed
+        ? `${parsed[1]}${timeoutSec}${parsed[3]}`
+        : `startup_timeout_sec = ${timeoutSec}`;
       return lines.join(eol);
     }
   }
