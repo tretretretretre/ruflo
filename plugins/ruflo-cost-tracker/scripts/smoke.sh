@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Structural smoke test for ruflo-cost-tracker v0.3.0 (ADR-0001 + ADR-0002).
+# Structural smoke test for ruflo-cost-tracker v0.26.1.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PASS=0
@@ -8,10 +8,10 @@ step() { printf "→ %s ... " "$1"; }
 ok()   { printf "PASS\n"; PASS=$((PASS+1)); }
 bad()  { printf "FAIL: %s\n" "$1"; FAIL=$((FAIL+1)); }
 
-step "1. plugin.json declares 0.26.0 with new keywords"
+step "1. plugin.json declares 0.26.1 with new keywords"
 v=$(grep -E '"version"' "$ROOT/.claude-plugin/plugin.json" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-if [[ "$v" != "0.26.0" ]]; then
-  bad "expected 0.26.0, got '$v'"
+if [[ "$v" != "0.26.1" ]]; then
+  bad "expected 0.26.1, got '$v'"
 else
   miss=""
   for k in namespace-routing mcp agentic-flow agent-booster tier1-routing model-routing benchmarking verified telemetry budget projection forecast counterfactual drift-detection trend-alert anomaly-detection outlier-detection health-check composite-gate auto-track stop-hook snapshot-diff pr-regression git-context traceability drill-down per-message; do
@@ -249,12 +249,12 @@ grep -q "|| true" "$F" || miss="$miss not-resilient"
 grep -q "CLAUDE_PLUGIN_ROOT" "$F" || miss="$miss no-plugin-root-var"
 [[ -z "$miss" ]] && ok || bad "$miss"
 
-step "29. track.mjs harness present + parses + uses spawnSync (no shell-escape risks)"
+step "29. track.mjs harness present + parses + uses safe argv spawning"
 F="$ROOT/scripts/track.mjs"
 miss=""
 [[ -x "$F" ]] || miss="$miss not-executable"
 node --check "$F" 2>/dev/null || miss="$miss syntax-error"
-grep -q "spawnSync" "$F" || miss="$miss no-spawnSync"
+grep -qE "spawnNpxSync|spawnSync" "$F" || miss="$miss no-safe-spawn"
 grep -q "PRICING" "$F" || miss="$miss no-pricing-table"
 [[ -z "$miss" ]] && ok || bad "$miss"
 
@@ -285,12 +285,12 @@ grep -qE "budget\.mjs|cost-tracking:budget-config" "$F" || miss="$miss budget-sc
 grep -q '^allowed-tools:[[:space:]]*\*' "$F" && miss="$miss wildcard"
 [[ -z "$miss" ]] && ok || bad "$miss"
 
-step "32. budget.mjs harness present + parses + uses spawnSync"
+step "32. budget.mjs harness present + parses + uses safe argv spawning"
 F="$ROOT/scripts/budget.mjs"
 miss=""
 [[ -x "$F" ]] || miss="$miss not-executable"
 node --check "$F" 2>/dev/null || miss="$miss syntax-error"
-grep -qE "spawnSync|_sessions\.mjs" "$F" || miss="$miss no-safe-exec"
+grep -qE "spawnNpxSync|spawnSync|_sessions\.mjs" "$F" || miss="$miss no-safe-exec"
 grep -qE "HARD_STOP|alertLevel" "$F" || miss="$miss no-alert-impl"
 grep -q "process.exit(1)" "$F" || miss="$miss no-fail-closed"
 # iter 75 regression guard: in the WITH-BUDGET branch (after `const alert =
@@ -325,7 +325,7 @@ F="$ROOT/scripts/outcome.mjs"
 miss=""
 [[ -x "$F" ]] || miss="$miss not-executable"
 node --check "$F" 2>/dev/null || miss="$miss syntax-error"
-grep -q "spawnSync" "$F" || miss="$miss no-spawnSync"
+grep -qE "spawnNpxSync|spawnSync" "$F" || miss="$miss no-safe-spawn"
 grep -q "hooks.*model-outcome" "$F" || miss="$miss no-hooks-call"
 grep -qE "success.*escalated.*failure|ALLOWED" "$F" || miss="$miss no-validation"
 [[ -z "$miss" ]] && ok || bad "$miss"
@@ -621,7 +621,7 @@ F="$ROOT/scripts/_sessions.mjs"
 miss=""
 [[ -f "$F" ]] || miss="$miss missing"
 node --check "$F" 2>/dev/null || miss="$miss syntax-error"
-grep -q "spawnSync" "$F" || miss="$miss no-spawnSync"
+grep -qE "spawnNpxSync|spawnSync" "$F" || miss="$miss no-safe-spawn"
 grep -q "memoryListAllKeys" "$F" || miss="$miss no-list-all-export"
 grep -q "memoryListSessionKeys" "$F" || miss="$miss no-list-session-export"
 grep -q "memoryRetrieve" "$F" || miss="$miss no-retrieve-export"

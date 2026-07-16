@@ -8,6 +8,7 @@ import { output } from '../output.js';
 import { confirm, select, multiSelect, input } from '../prompt.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import { spawnSync } from 'node:child_process';
 import {
   executeInit,
   executeUpgrade,
@@ -105,6 +106,36 @@ async function resolveCodexInitializer(cwd: string): Promise<CodexInitializerCto
     }
   }
   return undefined;
+}
+
+// Keep Codex out of the CLI dependency graph so cold `npx ruflo --version`
+// remains fast (#2561). An explicit `init --codex` may fetch the small,
+// stable adapter on demand when it is not already installed by an umbrella
+// package, the current project, or the global npm prefix.
+export function runCodexInitializerCli(
+  cwd: string,
+  options: { template: string; force: boolean; dual: boolean },
+): boolean {
+  const npxArgs = [
+    '-y',
+    '@claude-flow/codex@latest',
+    'init',
+    '--template',
+    options.template,
+    ...(options.force ? ['--force'] : []),
+    ...(options.dual ? ['--dual'] : []),
+  ];
+
+  const result = process.platform === 'win32'
+    ? spawnSync(
+        process.env.ComSpec || 'cmd.exe',
+        ['/d', '/s', '/c', ['npx', ...npxArgs].join(' ')],
+        { cwd, stdio: 'inherit', windowsHide: true },
+      )
+    : spawnSync('npx', npxArgs, { cwd, stdio: 'inherit' });
+
+  if (result.error) throw result.error;
+  return result.status === 0;
 }
 
 // #2666-adjacent — quietly wire up Codex too when a plain `ruflo init` (no
@@ -237,7 +268,14 @@ async function initCodexAction(
     const CodexInitializer = await resolveCodexInitializer(ctx.cwd);
 
     if (!CodexInitializer) {
-      throw new Error('Cannot find module @claude-flow/codex');
+      spinner.stop();
+      output.printInfo('Fetching the stable Codex adapter for this initialization...');
+      const success = runCodexInitializerCli(ctx.cwd, { template, force, dual: dualMode });
+      if (!success) {
+        output.printError('Codex initialization failed while running @claude-flow/codex@latest.');
+        return { success: false, exitCode: 1 };
+      }
+      return { success: true, data: { adapter: '@claude-flow/codex@latest' } };
     }
 
     const initializer = new CodexInitializer();

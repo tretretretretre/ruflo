@@ -1,15 +1,15 @@
 {
   "name": "@claude-flow/cli",
-  "version": "3.32.0",
+  "version": "3.32.1",
   "type": "module",
   "description": "Ruflo CLI - Enterprise AI agent orchestration with 60+ specialized agents, swarm coordination, MCP server, self-learning hooks, and vector memory for Claude Code",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
   "sideEffects": false,
   "bin": {
-    "cli": "./bin/cli.js",
-    "claude-flow": "./bin/cli.js",
-    "claude-flow-mcp": "./bin/mcp-server.js"
+    "cli": "bin/cli.js",
+    "claude-flow": "bin/cli.js",
+    "claude-flow-mcp": "bin/mcp-server.js"
   },
   "homepage": "https://github.com/ruvnet/claude-flow#readme",
   "bugs": {
@@ -17,7 +17,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/ruvnet/claude-flow.git",
+    "url": "git+https://github.com/ruvnet/claude-flow.git",
     "directory": "v3/@claude-flow/cli"
   },
   "keywords": [
@@ -90,8 +90,9 @@
     "test:plugin-store": "npx tsx src/plugins/tests/standalone-test.ts",
     "test:pattern-store": "npx tsx src/transfer/store/tests/standalone-test.ts",
     "postinstall": "node ./scripts/postinstall.cjs",
-    "prepublishOnly": "cp ../../../README.md ./README.md && rm -rf plugins && mkdir -p plugins && cp -r ../../../plugins/ruflo-metaharness plugins/ && node scripts/generate-catalog-manifest.mjs && node scripts/sign-helpers.mjs && node scripts/verify-helpers.mjs",
-    "release": "npm version prerelease --preid=alpha && npm run publish:all",
+    "prepublishOnly": "node scripts/prepare-publish.mjs",
+    "release": "npm publish --access public --tag latest",
+    "release:alpha": "npm version prerelease --preid=alpha && npm run publish:all",
     "publish:all": "./scripts/publish.sh"
   },
   "devDependencies": {
