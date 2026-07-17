@@ -52,3 +52,22 @@ GET    /v1/credits                     # credit balances (the single credit auth
 - The OpenAPI spec is the review artifact for any server change that touches the CLI; PRs to either repo that change the boundary must update the shared spec first.
 - Contract tests run in ruflo CI against a mock server generated from the spec — the funnel surfaces are testable with zero network and no Cognitum dependency.
 - `GET /v1/funnel-policy` responses are Ed25519-signed with the same key-management discipline as the helper channel; the CLI validates signature + policy schema before honoring anything (ADR-305 freshness kill switch is inert otherwise).
+
+## Addendum (2026-07-16) — the `/v1/auth/*` contract does not match the live identity server
+
+While implementing ADR-306, reading meta-proxy's actual, currently-shipping OAuth client
+(`oauth/client.rs` in `cognitum-one/meta-proxy`, real integration tests passing against
+production) showed it targets `auth.cognitum.one/oauth/{authorize,token}` +
+`auth.cognitum.one/v1/oauth/code-exchange` — a different host AND a different path scheme than
+this ADR's `/v1/auth/{device,token,revoke}` on `api.cognitum.one`. No open issue or PR in either
+`meta-proxy` or `dashboard` (which has its own separate, third, already-production OAuth+keychain
+CLI — `apps/cli`, per dashboard's ADR-005 — with its own endpoint usage not yet cross-checked
+against this spec either) discusses reconciling this.
+
+This is real drift between a checked-in contract and production reality, not a hypothetical
+future risk: `ruflo auth` (ADR-306) was implemented against the proven `auth.cognitum.one`
+surface instead of this ADR's `/v1/auth/*` shape, specifically to avoid shipping a client for
+endpoints nobody has confirmed exist. The `v3/docs/api/cognitum-v1.openapi.yaml` spec checked
+into this repo is consequently aspirational for the auth endpoints, not authoritative — flagged
+here rather than silently left to mislead the next person who builds against it. Reconciling the
+spec with reality (or vice versa) needs the API/identity owners, not a unilateral client-side fix.

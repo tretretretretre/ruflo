@@ -25,6 +25,7 @@ import { clearRateLimitStatus, readRateLimitStatus } from '../funnel/rate-limit-
 import { clearQuotaLowStatus, readQuotaLowStatus } from '../funnel/power-saver-notifier.js';
 import { getInstalledCliVersion } from '../init/helper-refresh.js';
 import * as path from 'path';
+import { proxyLifecycleSubcommands } from './proxy-lifecycle.js';
 
 const PROXY_CONFIG_FILE = 'proxy-config.toml';
 
@@ -44,12 +45,12 @@ function readProxyConfigRaw(): string {
   }
 }
 
-function writeConsentMirrorLine(field: string, value: boolean): void {
+function writeConfigLine(field: string, rawValue: string): void {
   const dir = funnelStateDir();
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const target = path.join(dir, PROXY_CONFIG_FILE);
   const raw = readProxyConfigRaw();
-  const line = `${field} = ${value}`;
+  const line = `${field} = ${rawValue}`;
   const pattern = new RegExp(`^${field}\\s*=.*$`, 'm');
   let next: string;
   if (pattern.test(raw)) {
@@ -60,6 +61,10 @@ function writeConsentMirrorLine(field: string, value: boolean): void {
   const tmp = `${target}.tmp`;
   fs.writeFileSync(tmp, next, { encoding: 'utf-8', mode: 0o600 });
   fs.renameSync(tmp, target);
+}
+
+function writeConsentMirrorLine(field: string, value: boolean): void {
+  writeConfigLine(field, String(value));
 }
 
 function writeSponsoredConsentMirror(granted: boolean): void {
@@ -73,6 +78,88 @@ function writePowerSaverConsentMirror(granted: boolean): void {
 function writeTrainingShareConsentMirror(granted: boolean): void {
   writeConsentMirrorLine('training_share_consent_granted', granted);
 }
+
+/**
+ * `default_data_plane` — the ADR-304 cloud-routing toggle. Values confirmed
+ * against meta-proxy's actual `DataPlane` enum (`src/config.rs`,
+ * `#[serde(rename_all = "snake_case")]`): "local" | "cloud" | "sponsored" |
+ * "passthrough" (the last two are not written by this command — sponsored
+ * is ADR-313's own consent flag, passthrough is the proxy's own default).
+ */
+function readDataPlane(): string {
+  const raw = readProxyConfigRaw();
+  const match = raw.match(/^default_data_plane\s*=\s*"([^"]*)"/m);
+  return match ? match[1] : 'passthrough'; // matches the Rust struct's own default
+}
+
+function writeDataPlane(plane: 'local' | 'cloud'): void {
+  writeConfigLine('default_data_plane', `"${plane}"`);
+}
+
+const CLOUD_ROUTING_DISCLOSURE = [
+  'Enabling cloud routing.',
+  '',
+  'With cloud routing ON, prompts for cloud-tier requests are sent to',
+  'api.cognitum.one and forwarded to the selected provider',
+  '(Claude / GPT / Gemini / DeepSeek / OpenRouter).',
+  '',
+  'Requests routed to local backends never leave this machine.',
+  '',
+  'Disable anytime: ruflo proxy config --local-only',
+].join('\n');
+
+const configSub: Command = {
+  name: 'config',
+  description: 'Toggle cloud routing (ADR-304) — local backends only by default',
+  options: [
+    { name: 'cloud', description: 'Enable cloud routing (requires cloud-routing consent)', type: 'boolean', default: false },
+    { name: 'local-only', description: 'Disable cloud routing, revert to local-only routing', type: 'boolean', default: false },
+    { name: 'yes', description: 'Skip the confirmation prompt', type: 'boolean', default: false },
+  ],
+  action: async (ctx): Promise<CommandResult> => {
+    const wantCloud = Boolean(ctx.flags.cloud);
+    const wantLocalOnly = Boolean(ctx.flags.localOnly ?? ctx.flags['local-only']);
+
+    if (wantCloud && wantLocalOnly) {
+      output.printError('Pass either --cloud or --local-only, not both.');
+      return { success: false, exitCode: 1 };
+    }
+
+    if (!wantCloud && !wantLocalOnly) {
+      const plane = readDataPlane();
+      output.writeln(`Current data plane: ${plane}`);
+      output.writeln(
+        plane === 'cloud'
+          ? 'Cloud routing is ON — cloud-tier requests go to api.cognitum.one.'
+          : 'Cloud routing is OFF — requests never leave this machine (or use your own Claude subscription on Passthrough).',
+      );
+      return { success: true, data: { plane } };
+    }
+
+    if (wantLocalOnly) {
+      writeDataPlane('local');
+      revokeConsent('cloud-routing', 'proxy-config-local-only');
+      output.printSuccess('Cloud routing disabled — reverted to local-only routing.');
+      return { success: true, data: { plane: 'local' } };
+    }
+
+    // wantCloud
+    if (!hasConsent('cloud-routing')) {
+      output.writeln(CLOUD_ROUTING_DISCLOSURE);
+      output.writeln('');
+      if (!ctx.flags.yes) {
+        output.writeln('Re-run with --yes to confirm: ruflo proxy config --cloud --yes');
+        return { success: true, data: { confirmed: false } };
+      }
+      recordConsent('cloud-routing', true, 'proxy-config-cloud');
+    }
+    writeDataPlane('cloud');
+    output.printSuccess('Cloud routing enabled.');
+    output.writeln('  Requests routed to local backends still never leave this machine.');
+    output.writeln('  Disable anytime: ruflo proxy config --local-only');
+    return { success: true, data: { plane: 'cloud' } };
+  },
+};
 
 const SPONSOR_DISCLOSURE = [
   'Enabling sponsored downtime mode.',
@@ -313,19 +400,31 @@ const trainingShareStatusSub: Command = {
 
 export const proxyCommand: Command = {
   name: 'proxy',
-  description: 'Meta LLM Proxy — sponsored downtime + power saver + training-data sharing (ADR-304/307/313/314/315)',
+  description: 'Meta LLM Proxy — install/lifecycle + sponsored downtime + power saver + training-data sharing (ADR-304/307/313/314/315)',
   subcommands: [
+    ...proxyLifecycleSubcommands,
+    configSub,
     sponsorEnableSub, sponsorDisableSub, sponsorStatusSub, sponsorClearSub,
     powerSaverEnableSub, powerSaverDisableSub, powerSaverStatusSub, powerSaverClearSub,
     trainingShareEnableSub, trainingShareDisableSub, trainingShareStatusSub,
   ],
   examples: [
+    { command: 'ruflo proxy install --release 0.1.0 --yes', description: 'Install the meta-proxy binary' },
+    { command: 'ruflo proxy start', description: 'Start meta-proxy in the foreground' },
+    { command: 'ruflo proxy status', description: 'Show install + process status' },
+    { command: 'ruflo proxy config --cloud --yes', description: 'Enable cloud routing (ADR-304)' },
+    { command: 'ruflo proxy config --local-only', description: 'Revert to local-only routing' },
     { command: 'ruflo proxy sponsor-status', description: 'Show current sponsored-mode state' },
     { command: 'ruflo proxy sponsor-enable --yes', description: 'Opt into sponsored downtime capacity' },
     { command: 'ruflo proxy power-saver-enable --yes', description: 'Opt into power saver mode' },
     { command: 'ruflo proxy training-share-enable --yes', description: 'Opt into training-data sharing (ADR-315)' },
   ],
-  action: sponsorStatusSub.action,
+  action: async (ctx) => {
+    const { getProxyStatus } = await import('../proxy/lifecycle.js');
+    const status = getProxyStatus();
+    output.writeln(`Installed: ${status.installed ? 'yes' : 'no'}; Running: ${status.running ? `yes (pid ${status.pid})` : 'no'}`);
+    return sponsorStatusSub.action!(ctx);
+  },
 };
 
 export default proxyCommand;

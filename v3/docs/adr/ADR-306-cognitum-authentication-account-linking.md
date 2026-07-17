@@ -54,3 +54,57 @@ hosted.memory.use     ← consent domain: hosted-memory (new; same receipt rules
 - `@claude-flow/security` owns token handling primitives (keychain adapters, PKCE verifier generation); no other package touches token material.
 - `ruflo doctor` gains an auth component (keychain availability, token expiry, scope-vs-receipt consistency check).
 - The scope-vs-receipt consistency check is enforced client-side on every authenticated call: a scope with no receipt drops the capability and reports, fail-closed.
+
+## Addendum (2026-07-16) — implemented against the proven surface, not the ADR-308 spec
+
+`ruflo auth login|logout|status` is implemented in `v3/@claude-flow/cli/src/auth/` +
+`src/commands/auth.ts`, backed by a new OAuth+PKCE+keychain module in `@claude-flow/security`
+(`src/oauth/{client,pkce,browser,callback-server}.ts`, `src/keychain-adapter.ts`). Two decisions
+made during implementation, differing from this ADR's original text:
+
+- **Targets `auth.cognitum.one/oauth/{authorize,token}` + `/v1/oauth/code-exchange`, NOT
+  `api.cognitum.one/v1/auth/{device,token,revoke}`.** The latter is what ADR-308's checked-in
+  OpenAPI spec describes, but reading meta-proxy's actual, currently-shipping OAuth client
+  (`oauth/client.rs`) showed it hits a different host and a different path scheme entirely — and
+  meta-proxy's flow is real, tested, and working in production. Building against ADR-308's spec
+  would have meant shipping a client for endpoints nobody has confirmed exist. This is a genuine
+  drift between what was specified and what the identity server actually serves — see the
+  ADR-308 addendum.
+- **Reuses meta-proxy's registered `client_id=meta-proxy`, not a new `ruflo`-specific
+  registration.** Confirmed live 2026-07-16: `GET /oauth/authorize` with `client_id=meta-proxy`
+  and an arbitrary ruflo-controlled loopback `redirect_uri` returns a working consent page, not a
+  redirect_uri-mismatch error — so `services/identity`'s `validate_redirect_uri` does not enforce
+  a per-client exact-URI allowlist for this client, at least today. This is empirical behavior,
+  not a documented contract, and could tighten later; if it ever does, `ruflo auth` needs its own
+  registered client as a follow-up, not a silent breakage.
+- **Device flow (RFC 8628) was not built as a separate mechanism.** The OOB/manual-paste flow
+  meta-proxy already implements (`--no-browser`: print an authorize URL with the
+  `urn:ietf:wg:oauth:2.0:oob` redirect, prompt for a pasted code, exchange it via
+  `/v1/oauth/code-exchange`) serves the same headless use case this ADR's "device authorization
+  flow" row describes, and is what was ported. A true RFC 8628 device-code polling flow is not
+  implemented and is not currently known to exist on the identity server.
+
+`@claude-flow/security` is only an `optionalDependency` of the CLI — `ruflo auth` degrades to a
+clear, specific error (not a raw `ERR_MODULE_NOT_FOUND`) when it's absent, via
+`auth/security-bridge.ts`'s lazy-load wrapper.
+
+### Addendum (2026-07-16) — demand-driven silent refresh is wired
+
+`src/auth/client.ts::getValidAccessToken(profile)` is now the single consumer-facing token
+accessor. It returns an in-process token only when more than 60 seconds of validity remain;
+otherwise it loads the profile's refresh token from the OS keychain and performs exactly one
+refresh. Cognitum rotates refresh tokens with reuse detection, so the returned refresh token is
+written to the keychain **before** the new access token is placed in process memory or returned.
+If that keychain write fails, the access token is not published and the spent refresh token is
+not retried by this layer.
+
+The accessor also enforces the scope-to-consent invariant before returning any token. Profiles
+without a persisted refresh token fail with an explicit session-only/login-required error rather
+than persisting token material elsewhere.
+
+Refresh remains demand-driven, not timer-driven: plain `ruflo auth status` reads cached identity
+metadata and performs no network request, preserving this ADR's offline behavior. `ruflo auth
+status --check` is the first explicit consumer; it validates the selected profile(s), silently
+refreshes when necessary, and reports only credential state (`valid`, `login-required`, or
+`unavailable`) — never token material. Future authenticated Cognitum API calls must use this same
+accessor rather than reading the keychain or session cache directly.

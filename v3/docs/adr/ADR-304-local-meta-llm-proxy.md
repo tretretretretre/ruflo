@@ -105,3 +105,27 @@ The repository already carries an internal meta-llm gateway surface (`metallm_as
 - New CLI surface: `ruflo proxy …` — full lifecycle command set (`install|start|stop|status|logs|update|uninstall`) specified in ADR-307, plus `proxy config` for routing mode.
 - `ruflo doctor` gains a proxy health check component (details in ADR-307).
 - This is the conversion product the ADR-301/302/303 touchpoints funnel toward; activation rate is a North Star metric in ADR-305.
+
+## Addendum (2026-07-16) — `ruflo proxy config` implemented; real TOML wire values confirmed
+
+`ruflo proxy config --cloud [--yes] | --local-only` is implemented in
+`v3/@claude-flow/cli/src/commands/proxy.ts` (`configSub`), reusing the same consent-gated
+disclosure pattern the ADR-313/314/315 subcommands in that file already use
+(`hasConsent`/`recordConsent`/`revokeConsent` against the `cloud-routing` consent domain, plus a
+TOML mirror write to `proxy-config.toml`).
+
+**The exact wire value was confirmed two ways, not assumed**: reading meta-proxy's actual
+`DataPlane` enum (`src/config.rs`) showed `#[derive(Serialize, Deserialize)]` +
+`#[serde(rename_all = "snake_case")]` — so the TOML field is `default_data_plane = "<value>"`
+with `"local"` / `"cloud"` / `"sponsored"` / `"passthrough"` (lowercase; snake_case has no effect
+on these single-word variant names beyond lowercasing). This was cross-checked behaviorally
+against the real v0.1.0 binary: `default_data_plane = "Local"` (PascalCase, the wrong guess)
+silently fell back to the default plane (Passthrough) rather than erroring — consistent with this
+ADR's own "a malformed config must never crash the proxy" design, but a real trap for anyone
+guessing the casing from the Rust variant names alone. `"local"` (lowercase) took a visibly
+different code path in the same test. Only `"local"`/`"cloud"` are written by this command;
+`"sponsored"` stays owned by ADR-313's own `sponsor-enable`/`sponsor-disable`, and `"passthrough"`
+is never written (the proxy's own untouched default).
+
+`ruflo proxy config` (no flags) reports the current plane by reading the same file, defaulting to
+`"passthrough"` (matching the Rust struct's own default) when no config file exists yet.

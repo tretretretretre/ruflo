@@ -88,6 +88,8 @@ const commandLoaders: Record<string, CommandLoader> = {
   // User-facing preferences wrapper (ADR-311 copy discipline — no "funnel" in
   // the user surface). Forwards to the funnel primitives internally.
   settings: () => import('./settings.js'),
+  // Cognitum identity — login/logout/status (ADR-306)
+  auth: () => import('./auth.js'),
   // Meta LLM Proxy — sponsored downtime capacity (ADR-304/307/313)
   proxy: () => import('./proxy.js'),
   // Fable co-pilot advisor tip in the statusline insight ticker (ADR-316)
